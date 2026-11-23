@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/geteduroam/linux-app/internal/network"
@@ -48,14 +46,8 @@ func (l *CredentialsState) Get() (string, string) {
 
 func (l *CredentialsState) Validate() error {
 	ut := l.user.GetText()
-	if ut == "" {
-		return errors.New("username cannot be empty")
-	}
-	if !strings.HasPrefix(ut, l.cred.Prefix) {
-		return fmt.Errorf("username must begin with: \"%s\"", l.cred.Prefix)
-	}
-	if !strings.HasSuffix(ut, l.cred.Suffix) {
-		return fmt.Errorf("username must end with: \"%s\"", l.cred.Suffix)
+	if err := l.cred.ValidateUsername(ut); err != nil {
+		return err
 	}
 	if l.pwd.GetText() == "" {
 		return errors.New("password cannot be empty")
@@ -68,6 +60,11 @@ func (l *CredentialsState) Initialize() {
 	// prefill password and username
 	l.builder.GetObject("loginUsernameText").Cast(&l.user)
 	l.user.SetText(l.cred.Prefix + l.cred.Suffix)
+	if l.cred.Realm != "" {
+		l.user.SetPlaceholderText("user@" + l.cred.Realm)
+	} else {
+		l.user.SetPlaceholderText("")
+	}
 
 	l.builder.GetObject("loginPasswordText").Cast(&l.pwd)
 	l.pwd.SetText(l.cred.Password)

@@ -9,6 +9,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"strings"
 
 	"golang.org/x/exp/slog"
 
@@ -305,7 +306,7 @@ func (p *EAPIdentityProvider) SSIDSettings() ([]network.SSID, error) {
 
 		// tkip is too insecure
 		if i.MinRSNProto == "TKIP" {
-			slog.Warn("MinRSNProto is not TKIP", "minRSNProto", i.MinRSNProto)
+			slog.Warn("MinRSNProto is TKIP, skipping", "minRSNProto", i.MinRSNProto)
 			continue
 		}
 		ssids = append(ssids, network.SSID{
@@ -421,7 +422,7 @@ func (am *AuthenticationMethod) TLSNetwork(base network.Base) (network.Network, 
 
 	if identity != "" {
 		base.AnonIdentity = identity
-	} else { // if the identity is not given in the EAP metadata, set it to the subject common name
+	} else if fcc != nil { // if the identity is not given in the EAP metadata, set it to the subject common name
 		base.AnonIdentity = fcc.SubjectCN()
 	}
 	return &network.TLS{
@@ -436,7 +437,7 @@ func (am *AuthenticationMethod) TLSNetwork(base network.Base) (network.Network, 
 // The base that is passed here are settings that are common between TLS and NON-TLS networks
 func (am *AuthenticationMethod) NonTLSNetwork(base network.Base) (network.Network, error) {
 	// Define defaults
-	var username, password, identity, prefix, suffix string
+	var username, password, identity, prefix, suffix, realm string
 	// ClientSideCredential is defined, override the defaults
 	if cc := am.ClientSideCredential; cc != nil {
 		username = cc.UserName
@@ -448,8 +449,10 @@ func (am *AuthenticationMethod) NonTLSNetwork(base network.Base) (network.Networ
 			if cc.InnerIdentitySuffix != "" {
 				suffix = fmt.Sprintf("@%s", cc.InnerIdentitySuffix)
 			}
+		} else {
+			// without the hint, the suffix is the realm and subrealms are also valid
+			realm = strings.TrimPrefix(strings.TrimSpace(cc.InnerIdentitySuffix), "@")
 		}
-
 	}
 	// get the inner auth
 	it, err := am.preferredInnerAuthType()
@@ -464,6 +467,7 @@ func (am *AuthenticationMethod) NonTLSNetwork(base network.Base) (network.Networ
 		Username: username,
 		Prefix:   prefix,
 		Suffix:   suffix,
+		Realm:    realm,
 		Password: password,
 	}
 

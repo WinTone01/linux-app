@@ -2,6 +2,9 @@
 package network
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/geteduroam/linux-app/internal/network/cert"
@@ -76,8 +79,34 @@ type Credentials struct {
 	Prefix string
 	// Suffix is the suffix for the username
 	Suffix string
+	// Realm is the realm that the username must be in, subrealms are also allowed
+	// This is set when the organization gives a realm but does not enforce it as the exact suffix
+	Realm string
 	// Password is the string that is configured as the RADIUS password for the connection
 	Password string
+}
+
+// ValidateUsername checks if the username fulfills the prefix, suffix and realm that the organization wants
+func (c Credentials) ValidateUsername(username string) error {
+	if username == "" {
+		return errors.New("username cannot be empty")
+	}
+	if !strings.HasPrefix(username, c.Prefix) {
+		return fmt.Errorf("username must begin with: \"%s\"", c.Prefix)
+	}
+	if !strings.HasSuffix(username, c.Suffix) {
+		return fmt.Errorf("username must end with: \"%s\"", c.Suffix)
+	}
+	if c.Realm == "" {
+		return nil
+	}
+	user, realm, ok := strings.Cut(username, "@")
+	realm = strings.ToLower(realm)
+	want := strings.ToLower(c.Realm)
+	if !ok || user == "" || (realm != want && !strings.HasSuffix(realm, "."+want)) {
+		return fmt.Errorf("username must be in the form user@%s, or a subdomain such as user@sub.%s", c.Realm, c.Realm)
+	}
+	return nil
 }
 
 // NonTLS is a structure for creating a network that has EAP method not TLS

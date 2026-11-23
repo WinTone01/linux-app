@@ -71,7 +71,36 @@ func createCon(pUUID string, args connection.SettingsArgs) (*connection.Connecti
 	return s.AddConnection(args)
 }
 
-// installBase contains the code for creating a network with NetworkManager
+// groupCiphers returns the group (broadcast) ciphers that are allowed for a network
+// Access points that still run in WPA1/WPA2 mixed mode use TKIP for broadcast traffic, even for clients that use CCMP.
+// NetworkManager refuses to connect to these when TKIP is missing here.
+// Unicast traffic is not affected by this, that is protected by the pairwise cipher which stays at MinRSN
+func groupCiphers(minRSN string) []string {
+	var ret []string
+	for _, c := range []string{strings.ToLower(minRSN), "ccmp", "tkip"} {
+		if c != "" && !slices.Contains(ret, c) {
+			ret = append(ret, c)
+		}
+	}
+	return ret
+}
+
+// domainMatch returns the value for the 802-1x.domain-match setting, the server names separated by ;
+// domain-match is used instead of altsubject-matches because the latter only looks at the subject alternative names.
+// There are RADIUS servers with certificates that only have a common name, domain-match falls back to that
+// if the certificate has no DNS alternative names
+func domainMatch(serverIDs []string) string {
+	var ret []string
+	for _, sid := range serverIDs {
+		sid = strings.TrimSpace(sid)
+		if sid != "" && !slices.Contains(ret, sid) {
+			ret = append(ret, sid)
+		}
+	}
+	return strings.Join(ret, ";")
+}
+
+// installBaseSSID contains the code for creating a network with NetworkManager
 // This contains the shared network settings between TLS and NonTLS
 // The specific 8021x settings are given as an argument `specific`
 func installBaseSSID(n network.Base, ssid network.SSID, specifics map[string]interface{}, pUUID string) (string, error) {
@@ -92,7 +121,7 @@ func installBaseSSID(n network.Base, ssid network.SSID, specifics map[string]int
 		"key-mgmt": "wpa-eap",
 		"proto":    []string{"rsn"},
 		"pairwise": []string{strings.ToLower(ssid.MinRSN)},
-		"group":    []string{strings.ToLower(ssid.MinRSN)},
+		"group":    groupCiphers(ssid.MinRSN),
 	}
 	sIP4 := map[string]interface{}{
 		"method": "auto",
@@ -100,18 +129,13 @@ func installBaseSSID(n network.Base, ssid network.SSID, specifics map[string]int
 	sIP6 := map[string]interface{}{
 		"method": "auto",
 	}
-	var sids []string
-
-	for _, sid := range n.ServerIDs {
-		v := fmt.Sprintf("DNS:%s", sid)
-		sids = append(sids, v)
-	}
 	caBasePath, err := config.Directory()
 	if err != nil {
 		return "", err
 	}
-	s8021x := map[string]interface{}{
-		"altsubject-matches": sids,
+	s8021x := map[string]interface{}{}
+	if dm := domainMatch(n.ServerIDs); dm != "" {
+		s8021x["domain-match"] = dm
 	}
 	// cleanup old certificates
 	err = cert.Cleanup(caBasePath)

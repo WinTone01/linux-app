@@ -10,3 +10,6 @@
 /getgovroam-gui
 /getgovroam-notifcheck
 /shell.nix
+/packaging/arch/pkg/
+/packaging/arch/src/
+/packaging/arch/*.pkg.tar*

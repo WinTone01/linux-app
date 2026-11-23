@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,17 @@ import (
 	"github.com/geteduroam/linux-app/internal/utilsx"
 	"golang.org/x/text/language"
 )
+
+// NewHTTPClient returns the HTTP client to use for requests
+// Busy campus networks can be really slow, so the timeouts are quite long
+func NewHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSHandshakeTimeout = 30 * time.Second
+	return &http.Client{
+		Transport: tr,
+		Timeout:   2 * time.Minute,
+	}
+}
 
 // LocalizedString is a string localized in the language
 type LocalizedString struct {
@@ -175,7 +187,7 @@ func (i *Providers) FilterSort(search string) *Providers {
 
 // Custom gets provider info using a custom URL
 func Custom(ctx context.Context, query string) (*Provider, error) {
-	client := http.Client{Timeout: 10 * time.Second}
+	client := NewHTTPClient()
 	// parse URL and add scheme
 	u, err := url.Parse(query)
 	if err != nil {
@@ -208,7 +220,11 @@ func Custom(ctx context.Context, query string) (*Provider, error) {
 		ID:   "custom_profile",
 		Name: LocalizedStrings{{Display: "Custom Profile", Lang: "en"}},
 	}
-	ct := resp.Header.Get("Content-Type")
+	// the content type can have parameters, e.g. a charset
+	ct, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid content type: %w", err)
+	}
 	pt := ""
 	switch ct {
 	case "application/json":

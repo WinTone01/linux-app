@@ -35,6 +35,9 @@ func setPage(stack *adw.ViewStack, page *adw.ViewStackPage) {
 }
 
 func upper(str string) string {
+	if str == "" {
+		return str
+	}
 	return strings.ToUpper(str[:1]) + str[1:]
 }
 
@@ -53,6 +56,9 @@ func bytesPixbuf(b []byte) (*gdkpixbuf.Pixbuf, error) {
 	}
 	defer os.Remove(f.Name()) //nolint:errcheck
 	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +81,17 @@ func uiThread(cb func()) {
 		return false
 	}
 	glib.IdleAdd(&idlecb, 0)
+}
+
+// uiThreadWait runs the callback on the UI thread and waits until it is done
+// This must not be called from the UI thread itself
+func uiThreadWait(cb func()) {
+	done := make(chan struct{})
+	uiThread(func() {
+		defer close(done)
+		cb()
+	})
+	<-done
 }
 
 func uiTicker(d uint, cb func() bool) {

@@ -6,7 +6,28 @@ This repository contains the source code for the geteduroam Linux client. Curren
 
 Note that currently it only works with NetworkManager. But support for e.g. wpa-supplicant and iwd is planned.
 
+This is a fork of [geteduroam/linux-app](https://github.com/geteduroam/linux-app), see [changes in this fork](#changes-in-this-fork).
+
+# Install on Arch Linux
+For Arch Linux and distributions based on it (CachyOS, EndeavourOS, Manjaro, ...) there is an install script. It builds a
+pacman package from the source, with the GUI, the CLI and the notification checker:
+```bash
+git clone https://github.com/WinTone01/linux-app.git
+cd linux-app
+./install-arch.sh
+```
+
+The script installs the build dependencies and asks for your password when it is needed, do not run it as root. A
+version that was previously put in `~/.local` by hand is removed, your connection profiles are kept.
+
+To update, run `git pull` and then the script again. To uninstall:
+```bash
+./install-arch.sh --uninstall
+```
+
 # Install through DEB/RPM
+Note that these are the official packages, they do not have the changes in this fork.
+
 To install the client using official packages, go to the [GitHub
 releases page](https://github.com/geteduroam/linux-app/releases) and
 pick DEB or RPM. These files can be saved and double clicked in your
@@ -76,5 +97,34 @@ automatically. Note that when moving these files, make sure to reload systemd wi
 Also note that these files hard-code the path to your `geteduroam-notifcheck` binary, in the service files we assume it is in `/usr/bin/`.
 
 Contributions are welcome to support other daemons.
+
+# Unwall
+If [Unwall](https://github.com/WinTone01/Unwall) is installed, the client asks after adding a profile if it should connect
+and set up Unwall for the network. If you agree:
+- Encrypted DNS is turned on with the first provider that can be reached (Quad9, Cloudflare or Google). It is turned off
+  again if names do not resolve with it
+- The Unwall engine is started, if it is not running
+- The current strategy is saved for the network, if there is none saved yet
+
+This asks for your password using polkit. Nothing happens if Unwall is not installed or if you answer no. To do this
+later for a profile that was already added:
+```bash
+geteduroam-cli --unwall
+```
+Check if the rules of the network allow this, your connection is tied to your account.
+
+# Changes in this fork
+- Access points in WPA1/WPA2 mixed mode work: these use TKIP for broadcast traffic, which NetworkManager refused. Your own
+  traffic still has to use the cipher that the organization wants (CCMP)
+- RADIUS servers that only have their name in the common name of the certificate work. The certificate and the name are
+  still verified
+- The username is checked against the realm of the organization, e.g. `user` is refused if it has to be
+  `user@example.org` or `user@sub.example.org`
+- The client works on slow networks: longer timeouts, the list of organizations is cached on disk and the GUI does not
+  freeze while it is loading
+- The GUI only uses GTK from the UI thread, and no longer unrefs the validity label twice
+- Fixed crashes with a TLS profile without a client certificate, an empty state file and an invalid organization logo
+- The CLI exits when there is no more input instead of looping forever
+
 # License
 [BSD 3](./LICENSE)

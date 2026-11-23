@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/exp/slog"
@@ -27,7 +29,7 @@ type Value struct {
 }
 
 // Cache is the cached discovery list
-// TODO: This should be read from disk so that the app can function when the discovery is offline
+// It is also stored on disk so that the app can function when the discovery is not reachable
 type Cache struct {
 	// Cached is the cached list of discovery
 	Cached Discovery `json:"previous"`
@@ -51,11 +53,75 @@ func (c *Cache) ToUpdate() bool {
 	return n.After(u)
 }
 
+// location returns the path of the cache on disk
+func location() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, variant.DisplayName, "discovery.json"), nil
+}
+
+// load fills the cache from disk
+func (c *Cache) load() error {
+	p, err := location()
+	if err != nil {
+		return err
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	var disk Cache
+	if err := json.Unmarshal(b, &disk); err != nil {
+		return err
+	}
+	*c = disk
+	return nil
+}
+
+// save writes the cache to disk
+func (c *Cache) save() error {
+	p, err := location()
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	// write to a temporary file first, such that we never read a half written cache
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
 // Providers gets the providers either from the cache or from scratch
+// If getting them from scratch fails, an outdated cache is used
 func (c *Cache) Providers() (*provider.Providers, error) {
+	if c.LastUpdate.IsZero() {
+		if err := c.load(); err != nil {
+			slog.Debug("No usable discovery cache", "error", err)
+		}
+	}
 	if !c.ToUpdate() {
 		return &c.Cached.Value.Providers, nil
 	}
+	p, err := c.update()
+	if err != nil && len(c.Cached.Value.Providers) > 0 {
+		slog.Warn("Failed to update discovery, using the cache", "error", err, "updated", c.LastUpdate)
+		return &c.Cached.Value.Providers, nil
+	}
+	return p, err
+}
+
+// update gets the providers from scratch
+func (c *Cache) update() (*provider.Providers, error) {
 
 	req, err := http.NewRequest("GET", variant.DiscoveryURL, nil)
 	if err != nil {
@@ -63,7 +129,7 @@ func (c *Cache) Providers() (*provider.Providers, error) {
 	}
 
 	// Do request
-	client := http.Client{Timeout: 10 * time.Second}
+	client := provider.NewHTTPClient()
 	res, err := client.Do(req)
 	if err != nil {
 		slog.Debug("Error requesting discovery.json", "error", err)
@@ -95,5 +161,8 @@ func (c *Cache) Providers() (*provider.Providers, error) {
 
 	c.Cached = *d
 	c.LastUpdate = time.Now()
+	if err := c.save(); err != nil {
+		slog.Warn("Failed to write the discovery cache", "error", err)
+	}
 	return &d.Value.Providers, nil
 }

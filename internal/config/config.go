@@ -3,6 +3,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -99,6 +100,9 @@ func Load() (*Config, error) {
 			UUIDs:    []string{v.ConfigV1.UUID},
 			Validity: v.ConfigV1.Validity,
 		}, nil
+	}
+	if v.Config == nil {
+		return nil, errors.New("config file has no known version")
 	}
 	return v.Config, nil
 }

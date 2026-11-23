@@ -42,7 +42,7 @@ func (s *serverList) get(idx int, query string) (*provider.Provider, error) {
 		// TODO: add context
 		return provider.Custom(context.Background(), query)
 	}
-	if idx < 0 || idx > len(s.providers) {
+	if idx < 0 || idx >= len(s.providers) {
 		return nil, errors.New("index out of range")
 	}
 	return &s.providers[idx], nil
@@ -52,7 +52,7 @@ func (s *serverList) getNames(idx int, query string) (*provider.LocalizedStrings
 	if s.custom && idx == len(s.providers) {
 		return &provider.LocalizedStrings{{Display: query}}, nil
 	}
-	if idx < 0 || idx > len(s.providers) {
+	if idx < 0 || idx >= len(s.providers) {
 		return nil, errors.New("index out of range")
 	}
 	return &s.providers[idx].Name, nil
@@ -106,14 +106,17 @@ func (m *mainState) activate() {
 
 func (m *mainState) askCredentials(c network.Credentials, pi network.ProviderInfo) (string, string, error) {
 	login := NewCredentialsStateBase(m.builder, m.stack, c, pi)
-	login.Initialize()
+	uiThreadWait(login.Initialize)
 	user, pass := login.Get()
 	return user, pass, nil
 }
 
 func (m *mainState) askCertificate(cert string, pwd string, pi network.ProviderInfo) (string, string, error) {
-	base := NewCertificateStateBase(m.app.GetActiveWindow(), m.builder, m.stack, cert, pwd, pi)
-	base.Initialize()
+	var base *LoginBase
+	uiThreadWait(func() {
+		base = NewCertificateStateBase(m.app.GetActiveWindow(), m.builder, m.stack, cert, pwd, pi)
+		base.Initialize()
+	})
 	cert, pass := base.Get()
 	return cert, pass, nil
 }
@@ -205,8 +208,8 @@ func (m *mainState) rowActivated(sel provider.Provider) {
 			}
 			fmt.Println("Browser has been opened with URL:", url)
 		}
-		s := NewSuccessState(m.builder, m.app.GetActiveWindow(), m.stack, vBeg, vEnd, isredirect)
 		uiThread(func() {
+			s := NewSuccessState(m.builder, m.app.GetActiveWindow(), m.stack, vBeg, vEnd, isredirect)
 			s.Initialize()
 		})
 		return nil
@@ -214,9 +217,11 @@ func (m *mainState) rowActivated(sel provider.Provider) {
 	cb := func(p provider.Profile) {
 		err := chosen(p)
 		if err != nil {
-			l.Hide()
-			m.activate()
-			m.ShowError(err)
+			uiThread(func() {
+				l.Hide()
+				m.activate()
+				m.ShowError(err)
+			})
 		}
 	}
 	if len(sel.Profiles) > 1 {
@@ -227,19 +232,28 @@ func (m *mainState) rowActivated(sel provider.Provider) {
 	}
 }
 
+// loadServers gets the providers from discovery in the background
+// such that a slow network does not freeze the UI
+func (m *mainState) loadServers() {
+	go func() {
+		cache := discovery.NewCache()
+		inst, err := cache.Providers()
+		uiThread(func() {
+			if err != nil {
+				m.ShowError(err)
+				return
+			}
+			m.servers.providers = *inst
+			m.initList()
+		})
+	}()
+}
+
 func (m *mainState) initList() {
 	// style the treeview
 	var list gtk.ListView
 	m.builder.GetObject("searchList").Cast(&list)
 	defer list.Unref()
-
-	cache := discovery.NewCache()
-	inst, err := cache.Providers()
-	if err != nil {
-		m.ShowError(err)
-		return
-	}
-	m.servers.providers = *inst
 
 	var search gtk.SearchEntry
 	m.builder.GetObject("searchBox").Cast(&search)
@@ -313,6 +327,11 @@ func (m *mainState) initList() {
 
 	// Update the list when searching
 	search.ConnectSearchChanged(&changedcb)
+
+	// The user could have already searched while we were loading the servers
+	if search.GetText() != "" {
+		changedcb(search)
+	}
 }
 
 func (m *mainState) localMetadata() {
@@ -331,8 +350,10 @@ func (m *mainState) localMetadata() {
 				})
 				return
 			}
-			s := NewSuccessState(m.builder, m.app.GetActiveWindow(), m.stack, vBeg, vEnd, false)
-			s.Initialize()
+			uiThread(func() {
+				s := NewSuccessState(m.builder, m.app.GetActiveWindow(), m.stack, vBeg, vEnd, false)
+				s.Initialize()
+			})
 		}()
 	})
 }
@@ -393,7 +414,7 @@ func (m *mainState) Initialize() {
 	m.stack = &adw.ViewStack{}
 	m.builder.GetObject("pageStack").Cast(m.stack)
 	m.initServers()
-	m.initList()
+	m.loadServers()
 	m.initBurger()
 	m.activate()
 }

@@ -3,12 +3,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -17,12 +18,15 @@ import (
 	"golang.org/x/term"
 
 	"github.com/geteduroam/linux-app/internal/clientver"
+	"github.com/geteduroam/linux-app/internal/config"
 	"github.com/geteduroam/linux-app/internal/discovery"
 	"github.com/geteduroam/linux-app/internal/handler"
 	"github.com/geteduroam/linux-app/internal/logwrap"
 	"github.com/geteduroam/linux-app/internal/network"
+	"github.com/geteduroam/linux-app/internal/nm"
 	"github.com/geteduroam/linux-app/internal/notification"
 	"github.com/geteduroam/linux-app/internal/provider"
+	"github.com/geteduroam/linux-app/internal/unwall"
 	"github.com/geteduroam/linux-app/internal/utilsx"
 	"github.com/geteduroam/linux-app/internal/variant"
 )
@@ -43,8 +47,8 @@ func askSecret(prompt string, validator func(input string) bool) string {
 		fmt.Print(prompt)
 		pwd, err := term.ReadPassword(int(syscall.Stdin))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read password: %v", err)
-			continue
+			fmt.Fprintf(os.Stderr, "failed to read password: %v\n", err)
+			os.Exit(1)
 		}
 		fmt.Println()
 		// get the password as a string
@@ -66,6 +70,10 @@ func ask(prompt string, validator func(input string) bool) string {
 		_, err := fmt.Scanln(&x)
 		if err != nil {
 			slog.Debug("failed to get input", "err", err)
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(os.Stderr, "\nNo more input available, exiting")
+				os.Exit(1)
+			}
 			// x will be empty
 		}
 
@@ -176,31 +184,26 @@ func profile(profiles []provider.Profile) *provider.Profile {
 }
 
 // askUsername asks the user for the username
-// p is the prefix for which the username must start
-// s is the suffix for which the username must end
-func askUsername(p string, s string) string {
+// c are the credentials which contain the restrictions on the username
+func askUsername(c network.Credentials) string {
+	p, s := c.Prefix, c.Suffix
 	prompt := "Please enter your username"
 	if p != "" {
 		prompt += fmt.Sprintf(", beginning with: '%s'", p)
 	}
 	if s != "" {
 		if p != "" {
-			prompt += "and"
+			prompt += " and"
 		}
 		prompt += fmt.Sprintf(" ending with: '%s'", s)
 	}
+	if c.Realm != "" {
+		prompt += fmt.Sprintf(" (e.g. user@%s)", c.Realm)
+	}
 	prompt += ": "
 	username := ask(prompt, func(input string) bool {
-		if input == "" {
-			fmt.Fprintln(os.Stderr, "Please enter a username that is not empty")
-			return false
-		}
-		if !strings.HasPrefix(input, p) {
-			fmt.Fprintf(os.Stderr, "Your username does not begin with: '%s'\n", p)
-			return false
-		}
-		if !strings.HasSuffix(input, s) {
-			fmt.Fprintf(os.Stderr, "Your username does not end with: '%s'\n", s)
+		if err := c.ValidateUsername(input); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid username: %v\n", err)
 			return false
 		}
 		return true
@@ -258,7 +261,7 @@ func askCredentials(c network.Credentials, pi network.ProviderInfo) (string, str
 	username := c.Username
 	password := c.Password
 	if c.Username == "" {
-		username = askUsername(c.Prefix, c.Suffix)
+		username = askUsername(c)
 	}
 	if c.Password == "" {
 		password = askPassword()
@@ -271,7 +274,7 @@ func askCertificatePath() string {
 	return ask("Enter the path to a certificate: ", func(input string) bool {
 		_, err := os.Stat(input)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid certificate path with error: %v", err)
+			fmt.Fprintf(os.Stderr, "Invalid certificate path with error: %v\n", err)
 			return false
 		}
 		return true
@@ -337,13 +340,13 @@ func redirect(p *provider.Profile) {
 	if err != nil {
 		slog.Error("Failed to complete the flow, no redirect URI is available")
 		fmt.Fprintln(os.Stderr, "Failed to complete the flow, no redirect URI is available")
-		return
+		os.Exit(1)
 	}
 	err = exec.Command("xdg-open", r).Start()
 	if err != nil {
 		slog.Error("Failed to complete the flow, cannot open browser with error", "error", err)
 		fmt.Fprintf(os.Stderr, "Failed to complete the flow, cannot open browser with error: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	fmt.Println("Opened your browser, please continue the process there")
 }
@@ -356,6 +359,7 @@ func oauth(p *provider.Profile) (*time.Time, *time.Time) {
 	})
 	if err != nil {
 		slog.Error("Could not obtain eap config with OAuth", "error", err)
+		fmt.Printf("Could not obtain eap config with OAuth %v\n", err)
 		os.Exit(1)
 	}
 
@@ -394,6 +398,8 @@ func chosenProvider(chosen *provider.Provider) (*time.Time, *time.Time) {
 		direct(p)
 	case provider.RedirectFlow:
 		redirect(p)
+		// the profile is not added by us in this flow, the website takes over
+		os.Exit(0)
 	case provider.OAuthFlow:
 		return oauth(p)
 	}
@@ -423,6 +429,59 @@ func doURL(url string) (*time.Time, *time.Time) {
 	return chosenProvider(prov)
 }
 
+// askYesNo asks the user a yes/no question
+func askYesNo(prompt string) bool {
+	in := ask(prompt+" (y/n)?: ", func(msg string) bool {
+		if msg != "y" && msg != "n" {
+			fmt.Fprintln(os.Stderr, "Please enter y/n")
+			return false
+		}
+		return true
+	})
+	return in == "y"
+}
+
+// doUnwall connects to the profile that was added and configures Unwall for it
+func doUnwall(c *unwall.Client) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return errors.New("no connection profile has been added yet")
+	}
+	ctx := context.Background()
+	fmt.Printf("Connecting to %s...\n", variant.ProfileName)
+	if err := nm.Activate(ctx, cfg.UUIDs); err != nil {
+		return err
+	}
+	err = c.Setup(ctx, func(msg string) {
+		fmt.Println(msg)
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println("Unwall is ready for this network")
+	return nil
+}
+
+// mustUnwall runs doUnwall and exits if there is an error
+func mustUnwall(c *unwall.Client) {
+	if err := doUnwall(c); err != nil {
+		slog.Error("Failed to set up Unwall", "error", err)
+		fmt.Fprintf(os.Stderr, "Failed to set up Unwall: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// offerUnwall asks the user if Unwall should be configured, if it is installed
+func offerUnwall() {
+	c := unwall.Find()
+	if c == nil {
+		return
+	}
+	if askYesNo(fmt.Sprintf("Unwall is installed. Do you want to connect to %s now and set up Unwall for it", variant.ProfileName)) {
+		mustUnwall(c)
+	}
+}
+
 const usage = `Usage of %s:
   -h, --help                Prints this help information
   --version                 Prints version information
@@ -431,6 +490,7 @@ const usage = `Usage of %s:
   One of:
   -l <file>, --local=<file> The path to a local EAP metadata file
   -u <url>, --url=<url>     The URL where an EAP metadata file or Let's Wifi portal is hosted
+  --unwall                  Connect to the profile that was already added and set up Unwall for it
 
   This CLI binary is used to add an eduroam connection profile with integration using NetworkManager.
 
@@ -444,6 +504,7 @@ func main() {
 	var debug bool
 	var local string
 	var url string
+	var unwallf bool
 	program := fmt.Sprintf("%s-cli", variant.DisplayName)
 	lpath, err := logwrap.Location(program)
 	if err != nil {
@@ -459,6 +520,7 @@ func main() {
 	flag.StringVar(&local, "l", "", "The path to a local EAP metadata file")
 	flag.StringVar(&url, "url", "", "Enter a URL to get the EAP metadata from")
 	flag.StringVar(&url, "u", "", "Enter a URL to get the EAP metadata from")
+	flag.BoolVar(&unwallf, "unwall", false, "Set up Unwall for the profile that was already added")
 	flag.Usage = func() { fmt.Printf(usage, program, lpath) }
 	flag.Parse()
 	if help {
@@ -489,6 +551,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if unwallf {
+		if local != "" || url != "" {
+			fmt.Fprintln(os.Stderr, "You cannot combine --unwall with -l/--local or -u/--url")
+			os.Exit(1)
+		}
+		c := unwall.Find()
+		if c == nil {
+			fmt.Fprintln(os.Stderr, "Unwall is not installed, see https://github.com/WinTone01/Unwall")
+			os.Exit(1)
+		}
+		mustUnwall(c)
+		return
+	}
+
 	var vBeg *time.Time
 	var vEnd *time.Time
 	switch {
@@ -500,10 +576,15 @@ func main() {
 		vBeg, vEnd = doDiscovery()
 	}
 	fmt.Printf("\nThe %s profile has been added to NetworkManager\n", variant.ProfileName)
-	if vEnd == nil {
-		return
+	if vEnd != nil {
+		showValidity(vBeg, *vEnd)
 	}
-	fmt.Printf("Your profile is valid for: %d days\n", utilsx.ValidityDays(*vEnd))
+	offerUnwall()
+}
+
+// showValidity shows how long the profile is valid and asks if notifications must be shown when it expires
+func showValidity(vBeg *time.Time, vEnd time.Time) {
+	fmt.Printf("Your profile is valid for: %d days\n", utilsx.ValidityDays(vEnd))
 	curr := time.Now()
 	if vBeg != nil && curr.Before(*vBeg) {
 		delta := vBeg.Sub(curr)
@@ -515,12 +596,5 @@ func main() {
 	if !notification.HasDaemonSupport() {
 		return
 	}
-	in := ask("Do you want to enable notifications that warn for expiry of the profile (requires systemd and notify-send) (y/n)?: ", func(msg string) bool {
-		if msg != "y" && msg != "n" {
-			fmt.Fprintln(os.Stderr, "Please enter y/n")
-			return false
-		}
-		return true
-	})
-	notification.ConfigureDaemon(in == "y")
+	notification.ConfigureDaemon(askYesNo("Do you want to enable notifications that warn for expiry of the profile (requires systemd and notify-send)"))
 }

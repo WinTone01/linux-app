@@ -1,0 +1,52 @@
+# Builds the checkout that this file is in, see install-arch.sh in the root of the repository
+pkgname=geteduroam-git
+pkgver=0.16
+pkgrel=1
+pkgdesc="Client to easily and securely configure eduroam (GUI and CLI), built from a local checkout"
+arch=('x86_64' 'aarch64')
+url="https://github.com/WinTone01/linux-app"
+license=('BSD-3-Clause')
+depends=('networkmanager' 'gtk4' 'libadwaita' 'libnotify')
+optdepends=('polkit: set up Unwall from the client')
+makedepends=('go' 'git')
+provides=("geteduroam=$pkgver" "geteduroam-cli=$pkgver" "geteduroam-gui=$pkgver")
+conflicts=('geteduroam' 'geteduroam-cli' 'geteduroam-gui' 'geteduroam-cli-bin' 'geteduroam-gui-bin')
+# Go binaries, there is nothing useful to strip into a debug package
+options=('!debug')
+
+_root="$(realpath "$startdir/../..")"
+
+pkgver() {
+	cd "$_root"
+	# the number in the source is the last release
+	local ver
+	ver="$(sed -n 's/^const version = "\(.*\)"$/\1/p' internal/clientver/clientver.go)"
+	printf '%s.r%s.g%s' "${ver:-0.16}" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+	cd "$_root"
+	export CGO_ENABLED=0
+	local name
+	for name in cli gui notifcheck; do
+		go build -trimpath -buildvcs=false -mod=readonly -modcacherw \
+			-o "$srcdir/geteduroam-$name" "./cmd/geteduroam-$name"
+	done
+}
+
+check() {
+	cd "$_root"
+	go test -mod=readonly ./...
+}
+
+package() {
+	local name
+	for name in cli gui notifcheck; do
+		install -Dm755 "$srcdir/geteduroam-$name" "$pkgdir/usr/bin/geteduroam-$name"
+	done
+	cd "$_root"
+	install -d "$pkgdir/usr/share"
+	cp -r --no-preserve=ownership cmd/geteduroam-gui/resources/share/. "$pkgdir/usr/share/"
+	install -Dm644 -t "$pkgdir/usr/lib/systemd/user" systemd/user/geteduroam/*
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

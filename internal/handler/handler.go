@@ -67,7 +67,7 @@ func (h Handlers) Configure(eap []byte) (*time.Time, *time.Time, error) {
 		if t.Credentials.Username == "" || t.Credentials.Password == "" {
 			username, password, cerr := h.CredentialsH(t.Credentials, n.ProviderInfo())
 			if cerr != nil {
-				slog.Debug("Error asking for credentials", "error", err)
+				slog.Debug("Error asking for credentials", "error", cerr)
 				return nil, nil, cerr
 			}
 			t.Credentials.Username = username
@@ -88,6 +88,10 @@ func (h Handlers) Configure(eap []byte) (*time.Time, *time.Time, error) {
 			if err != nil {
 				return nil, nil, err
 			}
+		}
+		// the certificate was not available while parsing, e.g. because the user had to choose it
+		if t.AnonIdentity == "" {
+			t.AnonIdentity = t.ClientCert.SubjectCN()
 		}
 		vBeg, vEnd := t.Validity()
 		validFor = &vEnd

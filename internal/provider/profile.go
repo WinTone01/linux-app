@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
-	"time"
 
 	"codeberg.org/jwijenbergh/eduoauth-go/v2"
 )
@@ -96,7 +95,7 @@ func (p *Profile) EAPDirect() ([]byte, error) {
 		return nil, err
 	}
 
-	client := http.Client{Timeout: 10 * time.Second}
+	client := NewHTTPClient()
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -115,7 +114,7 @@ type letsWifiEndpoints struct {
 }
 
 func (p *Profile) getLetsWifiEndpoints() ([]byte, error) {
-	client := http.Client{Timeout: 10 * time.Second}
+	client := NewHTTPClient()
 	if p.LetsWifiEndpoint == "" {
 		return nil, errors.New("no Let's Wifi endpoint found")
 	}

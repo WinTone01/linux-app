@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	"golang.org/x/exp/slog"
+
+	"github.com/geteduroam/linux-app/internal/config"
+	"github.com/geteduroam/linux-app/internal/nm"
 	"github.com/geteduroam/linux-app/internal/notification"
+	"github.com/geteduroam/linux-app/internal/unwall"
 	"github.com/geteduroam/linux-app/internal/utilsx"
 	"github.com/geteduroam/linux-app/internal/variant"
 	"github.com/jwijenbergh/puregotk/v4/adw"
@@ -63,8 +69,8 @@ func (s *SuccessState) Initialize() {
 	styleWidget(&sub, "label")
 
 	var valid gtk.Label
+	// this is unreffed below as the ticker still needs it after this function is done
 	s.builder.GetObject("validityText").Cast(&valid)
-	defer valid.Unref()
 	validText := valid.GetText()
 	if s.vBeg == nil {
 		valid.Hide()
@@ -92,10 +98,12 @@ func (s *SuccessState) Initialize() {
 	// set the page as current
 	setPage(s.stack, &page)
 
-	if s.vEnd == nil {
+	// a redirect does not add a profile
+	if s.isredirect {
 		return
 	}
-	if !notification.HasDaemonSupport() {
+	if s.vEnd == nil || !notification.HasDaemonSupport() {
+		s.offerUnwall()
 		return
 	}
 
@@ -106,7 +114,65 @@ func (s *SuccessState) Initialize() {
 		defer glib.UnrefCallback(&dialogcb) //nolint:errcheck
 		notification.ConfigureDaemon(int32(response) == int32(gtk.ResponseYesValue))
 		dialog.Destroy()
+		s.offerUnwall()
 	}
 	dialog.ConnectResponse(&dialogcb)
 	dialog.Present()
+}
+
+// setSubTitle sets the text below the title
+func (s *SuccessState) setSubTitle(msg string) {
+	var sub gtk.Label
+	s.builder.GetObject("successSubTitle").Cast(&sub)
+	defer sub.Unref()
+	sub.SetWrap(true)
+	sub.SetJustify(gtk.JustifyCenterValue)
+	sub.SetText(msg)
+}
+
+// offerUnwall asks the user if Unwall should be configured, if it is installed
+func (s *SuccessState) offerUnwall() {
+	c := unwall.Find()
+	if c == nil {
+		return
+	}
+	dialog := gtk.NewMessageDialog(s.parent, gtk.DialogDestroyWithParentValue, gtk.MessageQuestionValue, gtk.ButtonsYesNoValue, fmt.Sprintf("Unwall is installed.\n\nDo you want to connect to %s now and set up Unwall for it?", variant.ProfileName))
+	var dialogcb func(gtk.Dialog, int)
+	dialogcb = func(_ gtk.Dialog, response int) {
+		defer glib.UnrefCallback(&dialogcb) //nolint:errcheck
+		dialog.Destroy()
+		if int32(response) == int32(gtk.ResponseYesValue) {
+			go s.setupUnwall(c)
+		}
+	}
+	dialog.ConnectResponse(&dialogcb)
+	dialog.Present()
+}
+
+// setupUnwall connects to the profile that was added and configures Unwall for it
+// This must not be called from the UI thread
+func (s *SuccessState) setupUnwall(c *unwall.Client) {
+	progress := func(msg string) {
+		uiThread(func() {
+			s.setSubTitle(msg)
+		})
+	}
+	setup := func() error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		ctx := context.Background()
+		progress(fmt.Sprintf("Connecting to %s...", variant.ProfileName))
+		if err := nm.Activate(ctx, cfg.UUIDs); err != nil {
+			return err
+		}
+		return c.Setup(ctx, progress)
+	}
+	if err := setup(); err != nil {
+		slog.Error("failed to set up Unwall", "error", err)
+		progress(fmt.Sprintf("Your %s profile has been added, but setting up Unwall failed:\n%s", variant.ProfileName, err))
+		return
+	}
+	progress(fmt.Sprintf("Connected to %s, Unwall is ready for this network", variant.ProfileName))
 }

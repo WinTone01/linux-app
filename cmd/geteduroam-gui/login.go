@@ -67,10 +67,15 @@ func (l *LoginBase) Destroy() {
 }
 
 func (l *LoginBase) Get() (string, string) {
-	defer l.state.Destroy()
-	defer l.Destroy()
 	l.wg.Wait()
-	return l.state.Get()
+	// we are not on the UI thread here as that would have been blocked by the wait above
+	var a, b string
+	uiThreadWait(func() {
+		a, b = l.state.Get()
+		l.Destroy()
+		l.state.Destroy()
+	})
+	return a, b
 }
 
 func (l *LoginBase) Submit() {
@@ -88,16 +93,15 @@ func (l *LoginBase) fillLogo(logo *gtk.Image) error {
 		return err
 	}
 	pb, err := bytesPixbuf(d)
-	if err == nil {
-		uiThread(func() {
-			// the image takes its own reference to the pixbuf
-			defer pb.Unref()
-			logo.SetFromPixbuf(pb)
-			// GtkImage renders at icon size by default, scale the logo to fit the requested size
-			logo.SetPixelSize(100)
-			logo.SetSizeRequest(100, 100)
-		})
+	if err != nil {
+		return err
 	}
+	// the image takes its own reference to the pixbuf
+	defer pb.Unref()
+	logo.SetFromPixbuf(pb)
+	// GtkImage renders at icon size by default, scale the logo to fit the requested size
+	logo.SetPixelSize(100)
+	logo.SetSizeRequest(100, 100)
 	return nil
 }
 
@@ -128,9 +132,9 @@ func (l *LoginBase) Initialize() {
 
 	if l.pi.Logo != "" {
 		err := l.fillLogo(&logo)
-		// TODO: do not panic here but just log
 		if err != nil {
-			panic(err)
+			slog.Error("failed to show the organization logo", "error", err)
+			logo.Hide()
 		}
 	} else {
 		logo.Hide()
